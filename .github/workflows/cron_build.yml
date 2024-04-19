@@ -1,0 +1,94 @@
+---
+name: Build CentOS-NVIDIA images
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CENTOS_VERSION: stream9
+  DRIVER_VERSION: 550.54.15
+  DRIVER_TYPE: passthrough
+  CUDA_VERSION: 12.4.1
+
+jobs:
+  check-image:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.get-image-tag.outputs.image_tag }}
+    steps:
+      - name: Check if image already exists
+        id: get-image-tag
+        continue-on-error: true
+        run: |
+          KERNEL_VERSION=$(skopeo inspect docker://quay.io/centos-bootc/centos-bootc:stream9 | jq -r '.Labels["ostree.linux"]')
+          KERNEL_VERSION_NOARCH=$(echo ${KERNEL_VERSION} | sed "s/.$(arch)//")
+          IMAGE_TAG="${{ env.DRIVER_VERSION}}-${KERNEL_VERSION_NOARCH}"
+          skopeo inspect docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG} || echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+  build-image:
+    needs: check-image
+    runs-on: ubuntu-latest
+#    if: ${{ needs.check-image.outputs.image_tag != '' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout current repository for the Dockerfiles
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set environment variables
+        run: |
+          CENTOS_VERSION_MAJOR=$(echo "${{ env.CENTOS_VERSION }}" | sed 's/stream//')
+          BASE_IMAGE_DIGEST=$(skopeo inspect docker://quay.io/centos-bootc/centos-bootc:${{ env.CENTOS_VERSION }} | jq -r '.Digest')
+          KERNEL_VERSION=$(skopeo inspect docker://quay.io/centos-bootc/centos-bootc:${{ env.CENTOS_VERSION }} | jq -r '.Labels["ostree.linux"]')
+          KERNEL_VERSION_NOARCH=$(echo "${KERNEL_VERSION}" | sed "s/\.$(arch)//")
+          DRIVER_TOOLKIT_IMAGE=ghcr.io/fabiendupont/driver-toolkit:${KERNEL_VERSION_NOARCH}
+
+          echo "CENTOS_VERSION_MAJOR=${CENTOS_VERSION_MAJOR}" >> $GITHUB_ENV
+          echo "BASE_IMAGE_DIGEST=${BASE_IMAGE_DIGEST}" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=${KERNEL_VERSION}" >> $GITHUB_ENV
+          echo "KERNEL_VERSION_NOARCH=${KERNEL_VERSION_NOARCH}" >> $GITHUB_ENV
+          echo "DRIVER_TOOLKIT_IMAGE=${DRIVER_TOOLKIT_IMAGE}" >> $GITHUB_ENV
+
+          echo "BUILD_ARCH=$(arch)" >> $GITHUB_ENV
+          echo "TARGET_ARCH=$(arch)" >> $GITHUB_ENV
+
+          echo "IMAGE_TAG=${{ needs.check-image.outputs.image_tag }}" >> $GITHUB_ENV
+      - name: Login to the container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Build and push driver-toolkit:${{ env.KERNEL_VERSION }}"
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Containerfile
+#          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            "BASE_IMAGE_DIGEST=${{ env.BASE_IMAGE_DIGEST }}"
+            "BUILD_DATE=${{ env.BUILD_DATE }}"
+            "CENTOS_VERSION=${{ env.CENTOS_VERSION }}"
+            "CENTOS_VERSION_MAJOR=${{ env.CENTOS_VERSION_MAJOR }}"
+            "CUDA_VERSION=${{ env.CUDA_VERSION }}"
+            "BUILD_ARCH=${{ env.BUILD_ARCH }}"
+            "TARGET_ARCH=${{ env.TARGET_ARCH }}"
+            "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            "DRIVER_VERSION=${{ env.DRIVER_VERSION }}"
+            "DRIVER_TOOLKIT_IMAGE=${{ env.DRIVER_TOOLKIT_IMAGE }}"
+            "DRIVER_TYPE=${{ env.DRIVER_TYPE}}"
