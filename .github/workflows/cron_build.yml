@@ -32,7 +32,7 @@ jobs:
   build-image:
     needs: check-image
     runs-on: ubuntu-latest
-#    if: ${{ needs.check-image.outputs.image_tag != '' }}
+    if: ${{ needs.check-image.outputs.image_tag != '' }}
     permissions:
       contents: read
       packages: write
